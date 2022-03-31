@@ -26,7 +26,7 @@ void PowerButton::simPress()
 
 void PowerButton::simLongPress()
 {
-    pressedLong();
+    released();
 }
 
 void PowerButton::updatePressedTime()
@@ -67,7 +67,6 @@ void PowerButton::handleEvent(sd_event_source* es, int fd, uint32_t revents)
         phosphor::logging::log<phosphor::logging::level::DEBUG>(
             "POWER_BUTTON: pressed");
 
-        updatePressedTime();
         // emit pressed signal
         pressed();
     }
@@ -76,18 +75,7 @@ void PowerButton::handleEvent(sd_event_source* es, int fd, uint32_t revents)
         phosphor::logging::log<phosphor::logging::level::DEBUG>(
             "POWER_BUTTON: released");
 
-        auto now = std::chrono::steady_clock::now();
-        auto d = std::chrono::duration_cast<std::chrono::milliseconds>(
-            now - getPressTime());
-
-        if (d > std::chrono::milliseconds(LONG_PRESS_TIME_MS))
-        {
-            pressedLong();
-        }
-        else
-        {
-            // released
-            released();
-        }
+        // emit released signal
+        released();
     }
 }

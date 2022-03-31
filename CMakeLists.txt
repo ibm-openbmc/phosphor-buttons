@@ -66,7 +66,7 @@ add_executable(${PROJECT_NAME} ${SRC_FILES} )
 target_link_libraries(${PROJECT_NAME} "${SDBUSPLUSPLUS_LIBRARIES} -lphosphor_dbus  -lstdc++fs")
 
 add_executable(button-handler ${HANDLER_SRC_FILES})
-target_link_libraries(button-handler "${SDBUSPLUSPLUS_LIBRARIES} -lphosphor_dbus")
+target_link_libraries(button-handler "${SDBUSPLUSPLUS_LIBRARIES} -lfmt -lsdeventplus -lphosphor_dbus")
 
 set (
     SERVICE_FILES
