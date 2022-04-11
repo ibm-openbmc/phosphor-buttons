@@ -2,7 +2,11 @@
 
 #include "settings.hpp"
 
+#include <fmt/format.h>
+
+#include <iomanip>
 #include <phosphor-logging/log.hpp>
+#include <sstream>
 #include <xyz/openbmc_project/State/Chassis/server.hpp>
 #include <xyz/openbmc_project/State/Host/server.hpp>
 
@@ -35,12 +39,20 @@ Handler::Handler(sdbusplus::bus::bus& bus) : bus(bus)
         if (!getService(POWER_DBUS_OBJECT_NAME, powerButtonIface).empty())
         {
             log<level::INFO>("Starting power button handler");
+            powerButtonPressed = std::make_unique<sdbusplus::bus::match_t>(
+                bus,
+                sdbusRule::type::signal() + sdbusRule::member("Pressed") +
+                    sdbusRule::path(POWER_DBUS_OBJECT_NAME) +
+                    sdbusRule::interface(powerButtonIface),
+                std::bind(std::mem_fn(&Handler::powerBtnPressed), this,
+                          std::placeholders::_1));
+
             powerButtonReleased = std::make_unique<sdbusplus::bus::match_t>(
                 bus,
                 sdbusRule::type::signal() + sdbusRule::member("Released") +
                     sdbusRule::path(POWER_DBUS_OBJECT_NAME) +
                     sdbusRule::interface(powerButtonIface),
-                std::bind(std::mem_fn(&Handler::powerPressed), this,
+                std::bind(std::mem_fn(&Handler::powerBtnReleased), this,
                           std::placeholders::_1));
 
             powerButtonLongPressReleased =
@@ -52,6 +64,13 @@ Handler::Handler(sdbusplus::bus::bus& bus) : bus(bus)
                         sdbusRule::interface(powerButtonIface),
                     std::bind(std::mem_fn(&Handler::longPowerPressed), this,
                               std::placeholders::_1));
+
+            powerOpTimer = std::make_unique<
+                sdeventplus::utility::Timer<sdeventplus::ClockId::Monotonic>>(
+                bus.get_event(), std::bind(&Handler::timerHandler, this),
+                pollInterval);
+            powerOpTimer->setEnabled(false);
+            powerOpState = PowerOpState::buttonNotPressed;
         }
     }
     catch (const sdbusplus::exception::exception& e)
@@ -258,5 +277,210 @@ void Handler::idPressed(sdbusplus::message::message& msg)
                         entry("ERROR=%s", e.what()));
     }
 }
+
+auto Handler::getPressTime() const
+{
+    return pressedTime;
+}
+
+void Handler::updatePressedTime(std::chrono::milliseconds timeout)
+{
+    pressedTime = std::chrono::steady_clock::now() + timeout;
+}
+
+void Handler::powerBtnPressed(sdbusplus::message::message& msg)
+{
+    try
+    {
+        if (!poweredOn())
+        {
+            powerPressed(msg);
+            return;
+        }
+    }
+    catch (const sdbusplus::exception::exception& e)
+    {
+        log<level::ERR>(
+            fmt::format("{}: Exception - {}", std::string(__func__), e.what())
+                .c_str());
+        return;
+    }
+
+    std::stringstream ss;
+
+    // System is On, initiate the power Off process
+    if (powerOpState == PowerOpState::buttonNotPressed)
+    {
+        powerOpState = PowerOpState::buttonPressed;
+        updatePressedTime(defaultHoldDownInterval);
+
+        // TODO: International symbol and countdown time to Op-Panel
+        ss.clear();
+        ss << std::right << std::setw(8) << "0?" << std::setw(8)
+           << std::chrono::duration_cast<std::chrono::seconds>(
+                  defaultHoldDownInterval)
+                  .count();
+        log<level::DEBUG>(fmt::format("{}", ss.str()).c_str());
+        powerOpTimer->restart(pollInterval);
+        return;
+    }
+
+    // Button press during DPO-FPO separation interval
+    if (powerOpState == PowerOpState::dpoFpoSeparation)
+    {
+        powerOpState = PowerOpState::fpoInitiated;
+        powerOpTimer->setEnabled(false);
+        updatePressedTime(fpoInterval);
+
+        // TODO: FPO SRC code and countdown to Op-Panel
+        ss.clear();
+        ss << std::right << std::setw(8) << "FPO SRC" << std::setw(8)
+           << std::chrono::duration_cast<std::chrono::seconds>(fpoInterval)
+                  .count();
+        log<level::DEBUG>(fmt::format("{}", ss.str()).c_str());
+        powerOpTimer->restart(pollInterval);
+        return;
+    }
+
+    // Any other state, do nothing...
+}
+
+void Handler::powerBtnReleased(sdbusplus::message::message& msg)
+{
+    // Button released during default hold interval, do nothing...
+    if (powerOpState == PowerOpState::buttonPressed)
+    {
+        powerOpState = PowerOpState::buttonNotPressed;
+        powerOpTimer->setEnabled(false);
+        return;
+    }
+
+    // Button released during DPO-FPO separation interval
+    if (powerOpState == PowerOpState::dpoInitiated)
+    {
+        // prepare for normal shutdown after DPO-FPO separation time
+        powerOpState = PowerOpState::dpoFpoSeparation;
+        return;
+    }
+
+    // Button was pressed or pressed/released while in DPO-FPO separation
+    // interval. FPO interval countdown
+    if (powerOpState == PowerOpState::fpoInitiated)
+    {
+        return;
+    }
+
+    // Button released after FPO timeout expired
+    powerOpState = PowerOpState::buttonNotPressed;
+    powerOpTimer->setEnabled(false);
+}
+
+void Handler::timerHandler()
+{
+    // Timer
+    std::stringstream ss;
+    const auto now = std::chrono::steady_clock::now();
+
+    // Default hold time countdown
+    if (powerOpState == PowerOpState::buttonPressed)
+    {
+        if (now > getPressTime())
+        {
+            // Default hold time expired, enters DPO interval
+            powerOpState = PowerOpState::dpoInitiated;
+            updatePressedTime(dpoInterval);
+
+            // TODO: DPO progress SRC code and countdown to Op-Panel
+            ss.clear();
+            ss << std::right << std::setw(8) << "DPO SRC" << std::setw(8)
+               << std::chrono::duration_cast<std::chrono::seconds>(dpoInterval)
+                      .count();
+            log<level::DEBUG>(fmt::format("{}", ss.str()).c_str());
+            return;
+        }
+
+        // TODO: International symbol and countdown time to Op-Panel
+        ss.clear();
+        ss << std::right << std::setw(8) << "0?" << std::setw(8)
+           << std::chrono::duration_cast<std::chrono::seconds>(getPressTime() -
+                                                               now)
+                  .count();
+        log<level::DEBUG>(fmt::format("{}", ss.str()).c_str());
+    }
+
+    // DPO-FPO separation interval countdown
+    if (powerOpState == PowerOpState::dpoInitiated ||
+        powerOpState == PowerOpState::dpoFpoSeparation)
+    {
+        if (now > getPressTime())
+        {
+            if (powerOpState == PowerOpState::dpoFpoSeparation)
+            {
+                // Button was released during DPO-FPO separation, power Off host
+                powerOpState = PowerOpState::buttonNotPressed;
+                sdbusplus::message::message msg; // dummy
+                powerPressed(msg);
+                powerOpTimer->setEnabled(false);
+            }
+            else
+            {
+                // Button still held down, DPO count expired, enter FPO interval
+                powerOpState = PowerOpState::fpoInitiated;
+                updatePressedTime(fpoInterval);
+
+                // TODO: FPO SRC code and countdown to Op-Panel
+                ss.clear();
+                ss << std::right << std::setw(8) << "FPO SRC" << std::setw(8)
+                   << std::chrono::duration_cast<std::chrono::seconds>(
+                          fpoInterval)
+                          .count();
+                log<level::DEBUG>(fmt::format("{}", ss.str()).c_str());
+            }
+            return;
+        }
+
+        auto countDown = std::chrono::duration_cast<std::chrono::seconds>(
+                             getPressTime() - now)
+                             .count();
+
+        // TODO: DPO SRC progress code and countdown to Op-Panel
+        ss.clear();
+        ss << std::right << std::setw(8) << "DPO SRC" << std::setw(8)
+           << countDown;
+        log<level::DEBUG>(fmt::format("{}", ss.str()).c_str());
+    }
+
+    // FPO interval countdown
+    if (powerOpState == PowerOpState::fpoInitiated)
+    {
+
+        if (now > getPressTime())
+        {
+            // FPO count expired, power Off Chassis
+            // TODO: SRC code before chassisoff to Op-Panel
+            ss.clear();
+            ss << std::right << std::setw(8) << "Done SRC" << std::setw(8)
+               << " ";
+            log<level::DEBUG>(fmt::format("{}", ss.str()).c_str());
+            powerOpState = PowerOpState::buttonNotPressed;
+            // emit pressedLong signal to shutdown the system
+            sdbusplus::message::message msg; // dummy
+            longPowerPressed(msg);
+            powerOpTimer->setEnabled(false);
+            return;
+        }
+
+        auto countDown = std::chrono::duration_cast<std::chrono::seconds>(
+                             getPressTime() - now)
+                             .count();
+
+        // TODO: FPO SRC code and countdown to Op-Panel
+        ss.clear();
+        ss << std::right << std::setw(8) << "FPO SRC" << std::setw(8)
+           << countDown;
+        log<level::DEBUG>(fmt::format("{}", ss.str()).c_str());
+    }
+}
+
 } // namespace button
 } // namespace phosphor

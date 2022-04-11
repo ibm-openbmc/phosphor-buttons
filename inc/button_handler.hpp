@@ -2,11 +2,22 @@
 
 #include <sdbusplus/bus.hpp>
 #include <sdbusplus/bus/match.hpp>
-
+#include <sdeventplus/event.hpp>
+#include <sdeventplus/utility/timer.hpp>
 namespace phosphor
 {
 namespace button
 {
+
+// Power Button states
+enum class PowerOpState
+{
+    buttonNotPressed,
+    buttonPressed,
+    dpoInitiated,
+    dpoFpoSeparation,
+    fpoInitiated,
+};
 
 /**
  * @class Handler
@@ -100,6 +111,11 @@ class Handler
     sdbusplus::bus::bus& bus;
 
     /**
+     * @brief Matches on the power button pressed signal
+     */
+    std::unique_ptr<sdbusplus::bus::match_t> powerButtonPressed;
+
+    /**
      * @brief Matches on the power button released signal
      */
     std::unique_ptr<sdbusplus::bus::match_t> powerButtonReleased;
@@ -118,6 +134,89 @@ class Handler
      * @brief Matches on the reset button released signal
      */
     std::unique_ptr<sdbusplus::bus::match_t> resetButtonReleased;
+
+    /**
+     * @brief Timer used to monitor host power off intervals
+     */
+    std::unique_ptr<
+        sdeventplus::utility::Timer<sdeventplus::ClockId::Monotonic>>
+        powerOpTimer;
+
+    /**
+     * @brief Holds a time point representing the current time
+     * and timeout.
+     */
+    decltype(std::chrono::steady_clock::now()) pressedTime;
+
+    /**
+     * @brief Get the Press Time object
+     *
+     * @return pressTime
+     */
+    auto getPressTime() const;
+
+    /**
+     * @brief Power Button Pressed
+     *
+     * @details This method is called when the power button is pressed to
+     * initiate host power ON/OFF process. It sets the power operation states -
+     * such as buttonPressed, buttonNotPressed, dpoInitiated, etc., - from
+     * current state to the next state.
+     *
+     * @param msg - the sdbusplus message object
+     */
+    void powerBtnPressed(sdbusplus::message::message& msg);
+
+    /**
+     * @brief Power Button Released
+     *
+     * @details This method is called when the power button is released. Like as
+     * in powerBtnPressed, it changes the power operation states as needed.
+     *
+     * @param msg - the sdbusplus message object
+     */
+    void powerBtnReleased(sdbusplus::message::message& msg);
+
+    /**
+     * @brief Handler to monitor the timeout interval
+     *
+     */
+    void timerHandler();
+
+    /**
+     * @brief Update pressTime
+     *
+     * @details Updates pressTime to a time point representing the current time
+     * and timeout.
+     *
+     * @param timeout - the timeout value to be added to the current time
+     */
+    void updatePressedTime(std::chrono::milliseconds timeout);
+
+    /**
+     * @brief Enum object to hold power operation state
+     */
+    PowerOpState powerOpState;
+
+    /**
+     * @brief poll interval constant
+     */
+    static constexpr std::chrono::milliseconds pollInterval{1000};
+
+    /**
+     * @brief Default button hold down interval constant
+     */
+    static constexpr std::chrono::milliseconds defaultHoldDownInterval{4000};
+
+    /**
+     * @brief Delayed Power Off interval constant
+     */
+    static constexpr std::chrono::milliseconds dpoInterval{10000};
+
+    /**
+     * @brief Fast/Emergency power off interval constant
+     */
+    static constexpr std::chrono::milliseconds fpoInterval{10000};
 };
 
 } // namespace button
