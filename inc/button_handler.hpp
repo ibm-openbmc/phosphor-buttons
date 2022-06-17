@@ -94,6 +94,13 @@ class Handler
     bool poweredOn() const;
 
     /**
+     * @brief Checks if BMC is in a Ready state
+     *
+     * @return true if BMC is in ready state, false else
+     */
+    bool isBmcReady() const;
+
+    /**
      * @brief Returns the service name for an object
      *
      * @param[in] path - the object path

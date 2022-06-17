@@ -131,6 +131,37 @@ std::string Handler::getService(const std::string& path,
     return objectData.begin()->first;
 }
 
+bool Handler::isBmcReady() const
+{
+    constexpr auto bmcObjectPath = "/xyz/openbmc_project/state/bmc0";
+    constexpr auto bmcInterface = "xyz.openbmc_project.State.BMC";
+    std::string bmcState;
+    try
+    {
+        auto service = getService(bmcObjectPath, bmcInterface);
+        auto method = bus.new_method_call(service.c_str(), bmcObjectPath,
+                                          propertyIface, "Get");
+        method.append(bmcInterface, "CurrentBMCState");
+        auto result = bus.call(method);
+
+        std::variant<std::string> val;
+        result.read(val);
+
+        if (auto pVal = std::get_if<std::string>(&val))
+        {
+            bmcState = *pVal;
+        }
+    }
+    catch (const sdbusplus::exception::exception& e)
+    {
+        log<level::ERR>(
+            fmt::format("{}: Exception - {}", std::string(__func__), e.what())
+                .c_str());
+    }
+
+    return bmcState == "xyz.openbmc_project.State.BMC.BMCState.Ready";
+}
+
 bool Handler::poweredOn() const
 {
     auto service = getService(CHASSIS_STATE_OBJECT_NAME, chassisIface);
@@ -294,6 +325,15 @@ void Handler::powerBtnPressed(sdbusplus::message::message& msg)
     {
         if (!poweredOn())
         {
+            if (!isBmcReady())
+            {
+                log<level::ERR>(
+                    fmt::format("{}: BMC is not yet ready, try later",
+                                std::string(__func__))
+                        .c_str());
+                return;
+            }
+
             powerPressed(msg);
             return;
         }
